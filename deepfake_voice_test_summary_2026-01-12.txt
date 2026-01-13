@@ -1,0 +1,203 @@
+Deepfake 음성 판독(Heuristic) 테스트 수행 기록 / 트러블슈팅 정리
+작성일: 2026-01-12 (KST)
+대상 서버: vm-int-security-ops-linux (10.123.128.21)
+작성자: 박도윤
+
+============================================================
+1) 목적
+============================================================
+- 휴대폰에서 전달받은 어머니 음성(.m4a)을 서버로 옮긴 뒤,
+  16kHz/mono WAV로 변환하여 간단한 휴리스틱(heuristic) 기반
+  “합성 음성(딥페이크) 의심도” 점수를 산출함.
+- 본 결과는 ‘참고용’이며, 최종 확정은 통화 콜백 + 세이프워드(사전 합의 문구)로 검증 권장.
+
+============================================================
+2) 환경(검증된 상태)
+============================================================
+[FFmpeg]
+- ffmpeg/ffprobe: /usr/bin/ffmpeg, /usr/bin/ffprobe
+- 버전: FFmpeg 5.1.7
+
+[Python]
+- 실행 위치: /root/deepfake_test
+- venv: /root/deepfake_test/.venv
+- 스크립트: /root/deepfake_test/voice_deepfake_heuristic.py
+
+[입력 음성 파일(원본)]
+- 파일: /home/azureuser/mom_voice.m4a
+- codec: AAC (LC), 48kHz, mono
+- duration: 18.07s
+
+============================================================
+3) 이슈 1: ffmpeg 변환 시 “input.mp3: No such file”
+============================================================
+[현상]
+- 아래 명령을 실행했으나 파일이 없어 실패
+  ffmpeg -y -i input.mp3 -ac 1 -ar 16000 input_16k_mono.wav
+  -> input.mp3: No such file or directory
+
+[원인]
+- 현재 디렉터리에 input.mp3가 존재하지 않음(파일 경로/파일명 불일치).
+- 실제로는 Windows 바탕화면에 mom_voice.m4a 파일이 있었음.
+
+[해결]
+- 파일을 서버로 업로드한 뒤, 실제 파일명/경로로 변환 수행(아래 5절 참조).
+
+============================================================
+4) 이슈 2: Windows -> Linux 전송(scp/ssh) Permission denied
+============================================================
+[현상]
+- scp/ssh 모두 다음과 같이 실패
+  Permission denied (publickey,gssapi-keyex,gssapi-with-mic)
+
+[원인(로그 근거)]
+- Windows OpenSSH debug 로그에 “identity file ... type -1” 다수 표기
+  -> 즉, 기본 키(id_rsa, id_ed25519 등)가 존재하지 않거나 접근 불가
+  -> 서버는 password 인증이 비활성화되어 있고(= publickey만 허용),
+     클라이언트 키가 없으니 로그인/전송이 불가한 상태
+
+[추가 확인]
+- -i 옵션으로 pem을 지정했으나 경로가 잘못되어 “No such file or directory”
+- PowerShell에서 pem 파일 검색(Get-ChildItem -Recurse)도 결과 없음
+  -> 실제 pem 파일의 위치/경로를 정확히 모르는 상태
+
+[해결(실제 조치)]
+- MobaXterm(SFTP)로 azureuser 계정 홈(/home/azureuser/)에 업로드하여 우회 전송 성공
+  업로드 확인:
+    [azureuser@vm-int-security-ops-linux ~]$ ls -al
+    -rw-r--r--. 1 azureuser azureuser 326917 Jan 12 08:36 mom_voice.m4a
+
+[권장(정식 해결책)]
+- pem 키 파일의 “정확한 경로”를 확인 후, 아래 형태로 재시도
+  ssh -i "C:\Users\dy.park\Downloads\keypair-infra-linux-general.pem" azureuser@10.123.128.21
+  scp -i "C:\Users\dy.park\Downloads\keypair-infra-linux-general.pem" mom_voice.m4a azureuser@10.123.128.21:/home/azureuser/
+
+============================================================
+5) 음성 변환: .m4a(AAC) -> 16kHz/mono WAV(PCM s16le)
+============================================================
+[목표 포맷]
+- 모델/도구 호환성 때문에 일반적으로 16kHz mono WAV(PCM signed 16-bit) 사용
+
+[변환 명령(성공)]
+ffmpeg -y -i mom_voice.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le input_16k_mono.wav
+
+[결과 검증(성공)]
+ffprobe -hide_banner -show_streams -select_streams a:0 input_16k_mono.wav | egrep "codec_name|sample_rate|channels|duration"
+
+출력 요약:
+- codec_name=pcm_s16le
+- sample_rate=16000
+- channels=1
+- duration=18.069312
+파일 크기:
+- /home/azureuser/input_16k_mono.wav (578,296 bytes)
+
+============================================================
+6) 이슈 3: 스크립트에 -h 옵션을 줬더니 에러 발생
+============================================================
+[현상]
+python voice_deepfake_heuristic.py -h 2>&1 | head -n 160
+-> FileNotFoundError: [Errno 2] No such file or directory: '-h'
+
+[원인]
+- 해당 스크립트는 argparse 같은 CLI 파서가 없어 -h를 “help 옵션”으로 처리하지 않음
+- 내부에서 첫 번째 인자를 “오디오 파일 경로(path)”로 간주하여 librosa.load('-h')를 수행
+- 즉, '-h'라는 파일을 열려고 하니 실패하는 정상적인 결과
+
+[결론]
+- 이 스크립트는 “파일 경로 1개를 인자로 받는 구조”로 사용해야 함
+  예: python voice_deepfake_heuristic.py /path/to/audio.wav
+
+============================================================
+7) 딥페이크 휴리스틱 판독 실행 결과(성공)
+============================================================
+[실행 위치]
+- root에서 venv 활성화 후 실행
+  cd /root/deepfake_test
+  source .venv/bin/activate
+
+[실행 명령(성공)]
+python voice_deepfake_heuristic.py /home/azureuser/input_16k_mono.wav
+
+[출력(원문 그대로)]
+=== Deepfake Suspicion (Heuristic) ===
+File: /home/azureuser/input_16k_mono.wav
+Score: 0.0 / 100
+
+[Features]
+- flat_mean: 0.01047451514750719
+- flat_std: 0.02793571725487709
+- centroid_mean: 1241.7283129433108
+- rolloff_mean: 2368.5815520446095
+- hf_ratio_mean: 0.1991884857416153
+- hf_ratio_std: 0.3706762194633484
+- f0_mean: 222.3135346571369
+- f0_std: 37.2309847616597
+- f0_cv: 0.16747061675340202
+- zcr_mean: 0.07115383219098513
+- rms_mean: 0.04515204206109047
+- rms_std: 0.052839841693639755
+
+[Reasons]
+- 뚜렷한 합성 패턴은 약함(단, 이것이 '진짜'를 의미하진 않음)
+
+[Next]
+- 이 점수는 참고용. 최종은 '콜백+세이프워드'로 확정해라.
+- 통화코덱/압축/잡음이면 탐지 신뢰도 낮아진다.
+
+============================================================
+8) 결과 해석(전문가용 요약)
+============================================================
+- Score 0.0/100 = “스크립트가 정의한 휴리스틱 기준으로는 합성 의심 신호가 거의 없었다”는 의미.
+- 하지만 이는 “진짜 음성”을 확정하는 증거가 아님.
+  이유:
+  1) 휴리스틱 기반 탐지(간단 특성값 기반)라서 회피/오탐 가능
+  2) 녹음 환경, 휴대폰 코덱(AAC), 잡음, 음량, 짧은 길이(18초) 등은 탐지 신뢰도를 흔들 수 있음
+  3) 최신 TTS/VC 모델은 스펙트럼 패턴을 더 자연스럽게 만들 수 있음
+
+[권장 운영 절차(실무)]
+- 1차: 자동 점수/특성값(본 스크립트)로 빠른 triage
+- 2차: 콜백(기존에 저장된 번호로 재통화) + 세이프워드 질문
+- 3차: 필요 시 다른 탐지 도구/모델(ASVspoof 기반, 딥러닝 분류기 등)로 교차검증
+
+============================================================
+9) 재현 가능한 “최종 명령 모음”
+============================================================
+# (azureuser) 파일 존재 확인
+ls -al /home/azureuser/mom_voice.m4a
+
+# m4a 메타 확인
+ffprobe -hide_banner -show_format -show_streams /home/azureuser/mom_voice.m4a
+
+# 16k/mono wav 변환
+ffmpeg -y -i /home/azureuser/mom_voice.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le /home/azureuser/input_16k_mono.wav
+
+# 변환 결과 검증
+ffprobe -hide_banner -show_streams -select_streams a:0 /home/azureuser/input_16k_mono.wav | egrep "codec_name|sample_rate|channels|duration"
+
+# (root) 스크립트 실행
+cd /root/deepfake_test
+source .venv/bin/activate
+python voice_deepfake_heuristic.py /home/azureuser/input_16k_mono.wav
+
+============================================================
+10) 체크포인트(다음 개선)
+============================================================
+- voice_deepfake_heuristic.py에 argparse 추가(-h/--help, --input 등)하면 운영성이 좋아짐
+- soundfile(=PySoundFile) 경고는 “help 옵션” 때문에 발생한 케이스였고,
+  정상 실행에서는 WAV가 잘 읽히므로 우선순위 낮음
+- 추후 “모델 기반” 검증(ASVspoof/딥러닝) 추가 시, threshold/ROC 기반으로 점수 해석 가능
+
+=======================================================================
+
+# DNS 확인
+getent hosts smtp.corp.local
+nslookup smtp.corp.local || true
+
+# 포트 확인 (둘 중 하나 쓰면 됨)
+nc -vz 10.10.10.25 25
+timeout 3 bash -c 'cat < /dev/null > /dev/tcp/10.10.10.25/25' && echo OK || echo FAIL
+
+==========================================================================
+
+-- 끝.

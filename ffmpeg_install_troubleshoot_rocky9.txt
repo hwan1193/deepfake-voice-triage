@@ -1,0 +1,215 @@
+# FFmpeg 설치 이슈 정리 (Rocky Linux 9 / EL9 계열)
+작성일: 2026-01-12
+호스트: vm-int-security-ops-linux
+작업 디렉터리: deepfake_test (venv 활성화 상태에서 실행했으나, ffmpeg는 OS 패키지로 설치됨)
+
+---
+## 1) 증상 (처음 상태)
+- ffmpeg / ffprobe 실행 불가
+  - `ffmpeg: command not found`
+  - `ffprobe: command not found`
+
+- 설치 시 의존성 오류 발생
+  - `ffmpeg-libs ... requires librubberband.so.2()(64bit)`
+  - `rubberband ... requires ladspa` (EPEL에서 rubberband가 ladspa를 요구)
+  - 결과적으로 ffmpeg 및 관련 라이브러리 설치가 중단됨
+
+---
+## 2) 원인 (왜 에러가 났나?)
+### 핵심 원인: ladspa 패키지 제공 저장소가 비활성화되어 있었음
+- `rubberband` 패키지가 `ladspa`(Linux Audio Developer’s Simple Plugin API)를 필요로 함.
+- EL9/Rocky9에서는 `ladspa` 패키지가 주로 **CRB(CodeReady Builder)** 저장소에 존재.
+- 초기에는 CRB가 꺼져 있어 `dnf install ladspa` / `dnf provides ladspa`에서 “No match”가 발생 → rubberband 설치 불가 → ffmpeg 설치 불가.
+
+### 참고: mirror timeout은 부수적 이슈
+- rpmfusion 미러 중 일부에서 30초 타임아웃이 났지만, 다른 미러로 자동 전환되어 결국 다운로드/설치가 완료됨.
+- 즉, 설치 실패의 본질 원인은 mirror가 아니라 **CRB 미활성화로 인한 ladspa 미제공**.
+
+---
+## 3) 해결 절차 (실제 수행한 조치)
+### (1) 저장소 준비
+1) EPEL 확인/설치
+- `sudo dnf install -y epel-release`
+  - 이미 설치되어 있었음
+
+2) RPM Fusion 저장소 추가
+- Free: `sudo dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm`
+- Nonfree: `sudo dnf install -y https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-9.noarch.rpm`
+
+3) 캐시 갱신
+- `sudo dnf makecache`
+
+### (2) CRB 활성화 (결정타)
+- `sudo dnf install -y dnf-plugins-core`
+- `sudo dnf config-manager --set-enabled crb`
+- `sudo dnf makecache`
+
+CRB 활성화 후, ladspa 패키지가 정상 검색됨:
+- `dnf search ladspa`
+- `dnf list '*ladspa*'`
+  - `ladspa.x86_64 (crb)` 등 확인됨
+
+### (3) FFmpeg 설치 재시도 → 성공
+- `sudo dnf install -y ffmpeg ffmpeg-libs`
+  - 의존성 해결되어 최종적으로 ffmpeg/ffprobe 설치 완료
+
+---
+## 4) 설치 결과 확인
+- `which ffmpeg ffprobe`
+  - `/usr/bin/ffmpeg`
+  - `/usr/bin/ffprobe`
+
+- `ffprobe -version | head`
+  - ffprobe version 5.1.7 확인
+  - 다양한 codec/필터 옵션 포함되어 빌드됨 (ladspa 포함)
+
+---
+## 5) 추가 이슈: input.mp3 변환 실패 원인
+### 증상
+- `ffmpeg -y -i input.mp3 -ac 1 -ar 16000 input_16k_mono.wav`
+  - `input.mp3: No such file or directory`
+- `ls -al *.wav`
+  - `No such file or directory`
+
+### 원인
+- 현재 작업 디렉터리(deepfake_test)에 **input.mp3 파일이 존재하지 않음**.
+- 파일명/경로가 다르거나, 아직 업로드/다운로드가 안 된 상태.
+
+### 해결 방법
+1) 현재 디렉터리에 파일 있는지 확인
+- `ls -al`
+- `find . -maxdepth 2 -type f | head -n 50`
+- `find . -type f -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a'`
+
+2) 실제 파일 경로를 알고 있다면 절대/상대경로로 변환
+예)
+- `ffmpeg -y -i /path/to/realfile.mp3 -ac 1 -ar 16000 input_16k_mono.wav`
+
+3) 파일명이 공백/한글 포함이면 따옴표로 감싸기
+- `ffmpeg -y -i "원본 파일.mp3" -ac 1 -ar 16000 input_16k_mono.wav`
+
+---
+## 6) 재현/운영용 치트시트 (요약 커맨드)
+### CRB + ffmpeg 설치 (Rocky9/EL9)
+1) `sudo dnf install -y epel-release dnf-plugins-core`
+2) `sudo dnf config-manager --set-enabled crb`
+3) `sudo dnf install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm`
+4) `sudo dnf install -y https://download1.rpmfusion.org/nonfree/el/rpmfusion-nonfree-release-9.noarch.rpm`
+5) `sudo dnf makecache --refresh`
+6) `sudo dnf install -y ffmpeg ffmpeg-libs`
+
+### 설치 확인
+- `ffmpeg -version | head`
+- `ffprobe -version | head`
+- `which ffmpeg ffprobe`
+
+### MP3 → 16k mono WAV 변환
+- `ffmpeg -y -i INPUT.mp3 -ac 1 -ar 16000 OUTPUT_16k_mono.wav`
+
+### 실행 방법 ###
+[root@vm-int-security-ops-linux deepfake_test]# source .venv/bin/activate
+
+(.venv) [root@vm-int-security-ops-linux deepfake_test]# python voice_deepfake_heuristic.py /home/azureuser/input_16k_mono.wav
+=== Deepfake Suspicion (Heuristic) ===
+File: /home/azureuser/input_16k_mono.wav
+Score: 0.0 / 100
+
+[Features]
+- flat_mean: 0.01047451514750719
+- flat_std: 0.02793571725487709
+- centroid_mean: 1241.7283129433108
+- rolloff_mean: 2368.5815520446095
+- hf_ratio_mean: 0.1991884857416153
+- hf_ratio_std: 0.3706762194633484
+- f0_mean: 222.3135346571369
+- f0_std: 37.2309847616597
+- f0_cv: 0.16747061675340202
+- zcr_mean: 0.07115383219098513
+- rms_mean: 0.04515204206109047
+- rms_std: 0.052839841693639755
+
+[Reasons]
+- 뚜렷한 합성 패턴은 약함(단, 이것이 '진짜'를 의미하진 않음)
+
+[Next]
+- 이 점수는 참고용. 최종은 '콜백+세이프워드'로 확정해라.
+- 통화코덱/압축/잡음이면 탐지 신뢰도 낮아진다.
+
+### (필요하면) m4a → 16k mono wav 변환 ###
+(.venv) [root@vm-int-security-ops-linux deepfake_test]# ffmpeg -y -i /home/azureuser/mom_voice.m4a -vn -ac 1 -ar 16000 -c:a pcm_s16le /home/azureuser/input_16k_mono.wav
+ffmpeg version 5.1.7 Copyright (c) 2000-2025 the FFmpeg developers
+  built with gcc 11 (GCC)
+  configuration: --prefix=/usr --bindir=/usr/bin --datadir=/usr/share/ffmpeg --docdir=/usr/share/doc/ffmpeg --incdir=/usr/include/ffmpeg --libdir=/usr/lib64 --mandir=/usr/share/man --arch=x86_64 --optflags='-O2 -flto=auto -ffat-lto-objects -fexceptions -g -grecord-gcc-switches -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -specs=/usr/lib/rpm/redhat/redhat-hardened-cc1 -fstack-protector-strong -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -m64 -march=x86-64-v2 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection' --extra-ldflags='-Wl,-z,relro -Wl,--as-needed -Wl,-z,now -specs=/usr/lib/rpm/redhat/redhat-hardened-ld -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 ' --extra-cflags=' -I/usr/include/rav1e' --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libvo-amrwbenc --enable-version3 --enable-bzlib --disable-crystalhd --enable-fontconfig --enable-frei0r --enable-gcrypt --enable-gnutls --enable-ladspa --enable-libaom --enable-libdav1d --enable-libass --enable-libbluray --enable-libcdio --enable-libdrm --enable-libjack --enable-libjxl --enable-libfreetype --enable-libfribidi --enable-libgsm --enable-libmp3lame --enable-libmysofa --enable-nvenc --enable-openal --enable-opencl --enable-opengl --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libpulse --enable-librsvg --enable-librubberband --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libvorbis --enable-libv4l2 --enable-libvidstab --enable-libvmaf --enable-version3 --enable-vapoursynth --enable-libvpx --enable-vulkan --enable-libshaderc --enable-libx264 --enable-libx265 --enable-libxvid --enable-libxml2 --enable-libzimg --enable-libzvbi --enable-lv2 --enable-avfilter --enable-libmodplug --enable-postproc --enable-pthreads --disable-static --enable-shared --enable-gpl --disable-debug --disable-stripping --shlibdir=/usr/lib64 --enable-lto --enable-libmfx --enable-runtime-cpudetect
+  libavutil      57. 28.100 / 57. 28.100
+  libavcodec     59. 37.100 / 59. 37.100
+  libavformat    59. 27.100 / 59. 27.100
+  libavdevice    59.  7.100 / 59.  7.100
+  libavfilter     8. 44.100 /  8. 44.100
+  libswscale      6.  7.100 /  6.  7.100
+  libswresample   4.  7.100 /  4.  7.100
+  libpostproc    56.  6.100 / 56.  6.100
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '/home/azureuser/mom_voice.m4a':
+  Metadata:
+    major_brand     : 3gp4
+    minor_version   : 0
+    compatible_brands: isom3gp4
+    creation_time   : 2026-01-12T08:03:40.000000Z
+    com.android.version: 16
+    com.samsung.android.utc_offset: +0900
+  Duration: 00:00:18.07, start: 0.000000, bitrate: 144 kb/s
+  Stream #0:0[0x1](eng): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, mono, fltp, 128 kb/s (default)
+    Metadata:
+      creation_time   : 2026-01-12T08:03:40.000000Z
+      handler_name    : SoundHandle
+      vendor_id       : [0][0][0][0]
+Stream mapping:
+  Stream #0:0 -> #0:0 (aac (native) -> pcm_s16le (native))
+Press [q] to stop, [?] for help
+Output #0, wav, to '/home/azureuser/input_16k_mono.wav':
+  Metadata:
+    major_brand     : 3gp4
+    minor_version   : 0
+    compatible_brands: isom3gp4
+    com.samsung.android.utc_offset: +0900
+    com.android.version: 16
+    ISFT            : Lavf59.27.100
+  Stream #0:0(eng): Audio: pcm_s16le ([1][0][0][0] / 0x0001), 16000 Hz, mono, s16, 256 kb/s (default)
+    Metadata:
+      creation_time   : 2026-01-12T08:03:40.000000Z
+      handler_name    : SoundHandle
+      vendor_id       : [0][0][0][0]
+      encoder         : Lavc59.37.100 pcm_s16le
+size=     565kB time=00:00:18.06 bitrate= 256.0kbits/s speed=1.17e+03x
+video:0kB audio:565kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.013490%
+
+### 텔레그램 봇 알림 실행 시 방법 ###
+
+cd /root/deepfake_test
+chmod +x call_verify_bot.py
+
+export TG_BOT_TOKEN="실제토큰"
+export TG_CHAT_ID="-100xxxxxxxxxx"
+
+python3 call_verify_bot.py --from-num 01058113247 --who "엄마" --summary "검사 사칭 + 급전 요구"
+
+### 메일 알림 실행 시 방법 ###
+
+cd /root/deepfake_test
+chmod +x call_verify_mail.py
+
+export SMTP_HOST="smtp서버IP또는FQDN"
+export SMTP_PORT="25"
+export SMTP_FROM="dy.park@tracxlogis.com"
+export SMTP_TO="dy.park@tracxlogis.com"
+export SMTP_STARTTLS="false"
+export SMTP_SSL="false"
+
+python3 call_verify_mail.py --from-num 01058113247 --who "엄마" --summary "검사 사칭 + 급전 요구"
+
+
+### 도움말이 보고 싶을 때? (참고용) ###
+
+python voice_deepfake_heuristic.py --help
+
+---
+끝.
