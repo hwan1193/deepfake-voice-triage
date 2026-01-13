@@ -43,23 +43,23 @@ ffprobe -hide_banner -show_streams -select_streams a:0 input_16k_mono.wav | egre
 cd /root/deepfake_test
 source .venv/bin/activate
 python voice_deepfake_heuristic.py /path/to/input_16k_mono.wav
-
-(Result interpretation / 결과 해석)
+==============================================================================
+(Result interpretation / 결과 해석) :
 
 Score: 0~100
 
 낮다고 “진짜” 확정 아님
 
 짧은 음성/잡음/코덱/최신 TTS는 탐지를 흔들 수 있음
-
-(Verify protocol (Telegram))
+=============================================================================
+(Verify protocol (Telegram)) :
 
 사내망 정책으로 API 차단/토큰 제한이 있을 수 있음.
 
 export TG_BOT_TOKEN="..."
 export TG_CHAT_ID="-100..."
 python3 scripts/call_verify_bot.py --from-num 01000000000 --who "엄마" --summary "검사 사칭 + 급전 요구"
-
+==================================================================================================================
 # Troubleshooting
 
 -h 옵션 에러:
