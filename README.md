@@ -40,7 +40,7 @@ ffprobe -hide_banner -show_streams -select_streams a:0 input_16k_mono.wav | egre
 
 ## 실행 방법 ##
 
-cd /root/deepfake_test
+cd <PROJECT_DIR>
 source .venv/bin/activate
 python voice_deepfake_heuristic.py /path/to/input_16k_mono.wav
 ==============================================================================
